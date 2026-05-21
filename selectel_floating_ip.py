@@ -18,8 +18,10 @@ from sfip.api import (
 )
 from sfip.cli import attempts_label, main
 import sfip.config as _config
-from sfip.config import ENV_PATH, env_flag, env_float, env_int, normalize_chat_id
+from sfip.config import env_flag, env_float, env_int, normalize_chat_id
 from sfip.matchers import address_matches_local_lists, filter_ips, load_local_matchers
+
+ENV_PATH = _config.ENV_PATH
 
 __all__ = [
     "ApiError",

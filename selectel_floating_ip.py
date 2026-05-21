@@ -7,6 +7,7 @@ import argparse
 import http.client
 import ipaddress
 import json
+import logging
 import os
 import random
 import secrets
@@ -22,6 +23,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TRANSIENT_HTTP_STATUS_CODES = {408, 500, 502, 503, 504}
 ENV_PATH = SCRIPT_DIR / ".env"
 LOG_DIR = SCRIPT_DIR / "logs"
+
+logger = logging.getLogger("selectel_floating_ip")
 
 
 class ApiError(RuntimeError):
@@ -84,16 +87,31 @@ def sleep_with_jitter(min_seconds: float, max_seconds: float) -> None:
     return duration
 
 
-def init_log_path() -> Path:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    return LOG_DIR / f"run-{datetime.now().strftime('%Y%m%d')}.log"
+class _UtcIsoFormatter(logging.Formatter):
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        return datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
 
 
-def append_log_line(log_path: Path | None, message: str) -> None:
-    if not log_path:
+def setup_logging(*, log_to_file: bool = False) -> None:
+    if getattr(setup_logging, "_configured", False):
         return
-    with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(f"{utc_now()} {message}\n")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    logger.addHandler(stderr_handler)
+
+    if log_to_file:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = LOG_DIR / f"run-{datetime.now().strftime('%Y%m%d')}.log"
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(_UtcIsoFormatter("%(asctime)s %(message)s"))
+        logger.addHandler(file_handler)
+
+    setup_logging._configured = True  # type: ignore[attr-defined]
 
 
 def configure_stdio() -> None:
@@ -105,15 +123,15 @@ def configure_stdio() -> None:
 
 def confirm_continue_on_existing_match(address: str, floatingip_id: str) -> bool:
     if not sys.stdin.isatty():
-        print(
-            f"\u041d\u0430\u0439\u0434\u0435\u043d \u043f\u043e\u0434\u0445\u043e\u0434\u044f\u0449\u0438\u0439 "
-            f"\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0439 IP {address} "
-            f"(id={floatingip_id}). "
+        logger.warning(
+            "\u041d\u0430\u0439\u0434\u0435\u043d \u043f\u043e\u0434\u0445\u043e\u0434\u044f\u0449\u0438\u0439 "
+            "\u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u044e\u0449\u0438\u0439 IP %s (id=%s). "
             "\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d "
             "\u043d\u0435\u0438\u043d\u0442\u0435\u0440\u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0439 "
             "\u0440\u0435\u0436\u0438\u043c, \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043a\u0430 "
             "\u0431\u0435\u0437 \u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0439.",
-            file=sys.stderr,
+            address,
+            floatingip_id,
         )
         return False
 
@@ -176,7 +194,7 @@ def send_telegram_message(message: str, *, reply_markup: dict | None = None) -> 
     try:
         return telegram_api_request("sendMessage", payload)
     except Exception as error:
-        print(f"Telegram notify failed: {error}", file=sys.stderr)
+        logger.warning("Telegram notify failed: %s", error)
         return None
 
 
@@ -202,7 +220,7 @@ def safe_telegram_call(method: str, payload: dict | None = None) -> dict | None:
     try:
         return telegram_api_request(method, payload)
     except Exception as error:
-        print(f"Telegram {method} failed: {error}", file=sys.stderr)
+        logger.warning("Telegram %s failed: %s", method, error)
         return None
 
 
@@ -219,7 +237,7 @@ def next_telegram_update_offset() -> int | None:
     try:
         updates = get_telegram_updates(timeout=0)
     except Exception as error:
-        print(f"Telegram update probe failed: {error}", file=sys.stderr)
+        logger.warning("Telegram update probe failed: %s", error)
         return None
     if not updates:
         return None
@@ -291,7 +309,7 @@ def wait_for_telegram_match_confirmation(message: str) -> str | None:
         try:
             updates = get_telegram_updates(offset=offset, timeout=poll_timeout)
         except Exception as error:
-            print(f"Telegram confirmation polling failed: {error}", file=sys.stderr)
+            logger.warning("Telegram confirmation polling failed: %s", error)
             time.sleep(3)
             continue
 
@@ -376,10 +394,15 @@ def cleanup_created_ip(token: str, floatingip_id: str | None, address: str | Non
         if error.status_code == 404:
             return
         target = f"{address} " if address else ""
-        print(f"WARN: cleanup delete failed for {target}id={floatingip_id}: HTTP {error.status_code}", file=sys.stderr)
+        logger.warning(
+            "cleanup delete failed for %sid=%s: HTTP %s",
+            target,
+            floatingip_id,
+            error.status_code,
+        )
     except Exception as error:
         target = f"{address} " if address else ""
-        print(f"WARN: cleanup delete failed for {target}id={floatingip_id}: {error}", file=sys.stderr)
+        logger.warning("cleanup delete failed for %sid=%s: %s", target, floatingip_id, error)
 
 
 def api_request(method: str, path: str, token: str, payload: dict | None = None) -> dict:
@@ -547,11 +570,10 @@ def output_mode(args: argparse.Namespace) -> str:
 def emit(args: argparse.Namespace, payload: dict, compact_line: str | None = None) -> None:
     if output_mode(args) == "json" or not compact_line:
         print_json(payload)
-        log_path = getattr(args, "log_path", None)
-        append_log_line(log_path, json.dumps(payload, ensure_ascii=False))
+        logger.info(json.dumps(payload, ensure_ascii=False))
         return
     print(compact_line)
-    append_log_line(getattr(args, "log_path", None), compact_line)
+    logger.info(compact_line)
 
 
 def filter_ips(ips: list[dict], args: argparse.Namespace) -> list[dict]:
@@ -683,9 +705,11 @@ def planned_batch_size(token: str, project_id: str) -> tuple[int, list[dict]]:
         except ApiError as error:
             if error.status_code in {500, 502, 503, 504} and attempt < 3:
                 wait = min(30.0, 2.0 * (2 ** (attempt - 1)))
-                print(
-                    f"planned_batch_size: HTTP {error.status_code}, retry {attempt}/3 in {wait:.1f}s",
-                    file=sys.stderr,
+                logger.warning(
+                    "planned_batch_size: HTTP %s, retry %d/3 in %.1fs",
+                    error.status_code,
+                    attempt,
+                    wait,
                 )
                 time.sleep(wait)
             else:
@@ -736,7 +760,7 @@ def cmd_find(token: str, args: argparse.Namespace) -> int:
 
 
 def cmd_create(token: str, args: argparse.Namespace) -> int:
-    args.log_path = init_log_path()
+    setup_logging(log_to_file=True)
     project_id = args.project_id or str(env("SELECTEL_PROJECT_ID"))
     region = args.region or str(env("SELECTEL_REGION"))
     list_dir = Path(args.ip_list_dir)
@@ -1315,9 +1339,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     configure_stdio()
     load_env_file()
+    setup_logging()
     token = str(env("SELECTEL_X_TOKEN"))
     args = build_parser().parse_args()
-    args.log_path = None
     command_map = {
         "auth-check": cmd_auth_check,
         "list": cmd_list,

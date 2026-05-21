@@ -4,20 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
 import random
-import socket
 import secrets
 import sys
 import time
-import http.client
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-
 
 API_BASE = "https://api.selectel.ru/vpc/resell/v2"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -429,7 +427,7 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
                 sleep_with_jitter(wait_seconds, wait_seconds + 2.0)
                 continue
             raise ApiError(f"network error: {error}") from error
-        except (TimeoutError, socket.timeout) as error:
+        except TimeoutError as error:
             if attempt < max_retries:
                 wait_seconds = min(backoff_cap, backoff_base * max(1, attempt))
                 sleep_with_jitter(wait_seconds, wait_seconds + 2.0)
@@ -685,7 +683,10 @@ def planned_batch_size(token: str, project_id: str) -> tuple[int, list[dict]]:
         except ApiError as error:
             if error.status_code in {500, 502, 503, 504} and attempt < 3:
                 wait = min(30.0, 2.0 * (2 ** (attempt - 1)))
-                print(f"planned_batch_size: HTTP {error.status_code}, retry {attempt}/3 in {wait:.1f}s", file=sys.stderr)
+                print(
+                    f"planned_batch_size: HTTP {error.status_code}, retry {attempt}/3 in {wait:.1f}s",
+                    file=sys.stderr,
+                )
                 time.sleep(wait)
             else:
                 raise
@@ -717,10 +718,19 @@ def cmd_list(token: str, args: argparse.Namespace) -> int:
 def cmd_find(token: str, args: argparse.Namespace) -> int:
     items = list_floating_ips(token)
     items = filter_ips(items, args)
+    compact_line = (
+        f"matches={len(items)} ip_list_dir={args.ip_list_dir}"
+        if args.local_list
+        else f"matches={len(items)}"
+    )
     emit(
         args,
-        {"matches": items, "count": len(items), "ip_list_dir": args.ip_list_dir if args.local_list else None},
-        compact_line=f"matches={len(items)} ip_list_dir={args.ip_list_dir}" if args.local_list else f"matches={len(items)}",
+        {
+            "matches": items,
+            "count": len(items),
+            "ip_list_dir": args.ip_list_dir if args.local_list else None,
+        },
+        compact_line=compact_line,
     )
     return 0 if items else 1
 
@@ -852,7 +862,11 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                                 "attempt": attempt,
                                 "sleep_seconds": round(backoff_sec, 1),
                             },
-                            compact_line=f"attempt {attempt} -> HTTP {error.status_code} ({error.details.strip() or 'transient error'}), retry after {backoff_sec:.0f}s",
+                            compact_line=(
+                                f"attempt {attempt} -> HTTP {error.status_code} "
+                                f"({error.details.strip() or 'transient error'}), "
+                                f"retry after {backoff_sec:.0f}s"
+                            ),
                         )
                         time.sleep(backoff_sec)
                         continue
@@ -1248,17 +1262,46 @@ def build_parser() -> argparse.ArgumentParser:
     find_parser.add_argument("--status", help="Filter by status")
     find_parser.add_argument("--ip", help="Find exact IP")
     find_parser.add_argument("--prefix", help="Find by IP prefix")
-    find_parser.add_argument("--local-list", action="store_true", help="Return only IPs present in the local ip list folder")
-    find_parser.add_argument("--ip-list-dir", default=str(default_ip_list_dir()), help="Folder with *.txt IP and CIDR lists")
+    find_parser.add_argument(
+        "--local-list",
+        action="store_true",
+        help="Return only IPs present in the local ip list folder",
+    )
+    find_parser.add_argument(
+        "--ip-list-dir",
+        default=str(default_ip_list_dir()),
+        help="Folder with *.txt IP and CIDR lists",
+    )
 
-    create_parser = subparsers.add_parser("create", help="Create floating IPs one by one until one matches the local ip list folder")
+    create_parser = subparsers.add_parser(
+        "create",
+        help="Create floating IPs one by one until one matches the local ip list folder",
+    )
     create_parser.add_argument("--json", dest="json_output", action="store_true", help="Print JSON")
     create_parser.add_argument("--project-id", help="Target project id")
     create_parser.add_argument("--region", help="Region, for example ru-2")
-    create_parser.add_argument("--max-attempts", type=int, default=env_int("SELECTEL_MAX_ATTEMPTS", 100), help="How many create/delete attempts to make")
-    create_parser.add_argument("--delay-seconds", type=float, default=env_float("SELECTEL_DELAY_SECONDS", 2.0), help="Delay between failed attempts")
-    create_parser.add_argument("--ip-list-dir", default=str(default_ip_list_dir()), help="Folder with *.txt IP and CIDR lists")
-    create_parser.add_argument("--dry-run", action="store_true", help="Show the request without creating IPs")
+    create_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=env_int("SELECTEL_MAX_ATTEMPTS", 100),
+        help="How many create/delete attempts to make",
+    )
+    create_parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=env_float("SELECTEL_DELAY_SECONDS", 2.0),
+        help="Delay between failed attempts",
+    )
+    create_parser.add_argument(
+        "--ip-list-dir",
+        default=str(default_ip_list_dir()),
+        help="Folder with *.txt IP and CIDR lists",
+    )
+    create_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the request without creating IPs",
+    )
 
     delete_parser = subparsers.add_parser("delete", help="Delete floating IP by id or ip")
     delete_parser.add_argument("--json", dest="json_output", action="store_true", help="Print JSON")

@@ -1,0 +1,26 @@
+# Project tooling configuration.
+#
+# The runtime is stdlib-only — no runtime dependencies. This file exists for
+# linting/formatting and to pin the supported Python version.
+#
+# Install dev tooling:
+#   python3 -m venv .venv && . .venv/bin/activate
+#   pip install ruff
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

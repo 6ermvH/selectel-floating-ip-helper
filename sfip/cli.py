@@ -11,7 +11,6 @@ from pathlib import Path
 
 from .api import (
     ApiError,
-    batch_size_backoff,
     cleanup_created_ip,
     cleanup_nonmatching_project_ips,
     create_floating_ips,
@@ -53,6 +52,34 @@ def configure_stdio() -> None:
 
 def attempts_label(max_attempts: int) -> str:
     return "unlimited" if max_attempts <= 0 else str(max_attempts)
+
+
+def _format_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, mins = divmod(minutes, 60)
+    return f"{hours}h{mins:02d}m"
+
+
+def _rate_limit_backoff(error: ApiError) -> float:
+    """Pick a top-level sleep duration after a 429.
+
+    If Selectel returned a Retry-After (captured on ApiError), use it as the
+    lower bound — undercutting it just buys another 429. Otherwise fall back
+    to a uniform draw inside [MIN, MAX]; the defaults (540, 720) sit around
+    the empirically observed ~10 min limit.
+    """
+    floor = env_float("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", 540.0)
+    ceiling = env_float("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", 720.0)
+    if ceiling < floor:
+        ceiling = floor
+    observed = error.retry_after if error.retry_after is not None else 0.0
+    lower = max(floor, observed)
+    upper = max(ceiling, lower)
+    return random.uniform(lower, upper)
 
 
 def print_json(data: object) -> None:
@@ -126,6 +153,15 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
     region = args.region or str(env("SELECTEL_REGION"))
     list_dir = Path(args.ip_list_dir)
     ip_set, networks = load_local_matchers(list_dir)
+    # Selectel rate-limits POST /floatingips to ~1 batch per 10 min per
+    # project (empirical, 2026-05); use it to estimate worst-case wall-clock.
+    seconds_per_attempt = max(
+        args.delay_seconds,
+        env_float("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", 540.0),
+    )
+    estimated_wall_clock = (
+        None if args.max_attempts <= 0 else int(args.max_attempts * seconds_per_attempt)
+    )
     emit(
         args,
         {
@@ -135,11 +171,13 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
             "max_attempts": args.max_attempts,
             "ip_list_dir": str(list_dir),
             "entries_loaded": len(ip_set) + len(networks),
+            "estimated_max_wall_clock_seconds": estimated_wall_clock,
         },
         compact_line=(
             f"start project={project_id} region={region} "
             f"max_attempts={attempts_label(args.max_attempts)} "
-            f"ip_list_dir={list_dir} entries={len(ip_set) + len(networks)}"
+            f"ip_list_dir={list_dir} entries={len(ip_set) + len(networks)} "
+            f"max_wall_clock={'unlimited' if estimated_wall_clock is None else _format_duration(estimated_wall_clock)}"
         ),
     )
     if not ip_set and not networks:
@@ -214,10 +252,7 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                     break
                 except ApiError as error:
                     if is_rate_limit_error(error):
-                        backoff_sec = random.uniform(
-                            env_float("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", 300.0),
-                            env_float("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", 600.0),
-                        )
+                        backoff_sec = _rate_limit_backoff(error)
                         emit(
                             args,
                             {
@@ -225,6 +260,7 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                                 "status_code": error.status_code,
                                 "attempt": attempt,
                                 "sleep_seconds": round(backoff_sec, 1),
+                                "retry_after": error.retry_after,
                                 "details": error.details.strip() or "<empty>",
                             },
                             compact_line=(
@@ -344,32 +380,11 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                             env_float("SELECTEL_BACKOFF_CAP_SECONDS", 120.0),
                         ))
                         continue
-                    next_batch_size = batch_size_backoff(batch_size)
-                    if next_batch_size == batch_size:
-                        emit(
-                            args,
-                            {"quota_hit_stuck": True, "attempt": attempt, "batch_size": batch_size},
-                            compact_line=f"attempt {attempt} -> quota stuck at batch {batch_size}, waiting...",
-                        )
-                        time.sleep(random.uniform(
-                            env_float("SELECTEL_BACKOFF_BASE_SECONDS", 10.0),
-                            env_float("SELECTEL_BACKOFF_CAP_SECONDS", 120.0),
-                        ))
-                        continue
-                    emit(
-                        args,
-                        {
-                            "batch_reduced": True,
-                            "attempt": attempt,
-                            "from_batch_size": batch_size,
-                            "to_batch_size": next_batch_size,
-                        },
-                        compact_line=(
-                            f"attempt {attempt} -> quota hit, reducing batch "
-                            f"{batch_size} -> {next_batch_size}"
-                        ),
-                    )
-                    batch_size = next_batch_size
+                    # After quota recovery we retry the create with the same
+                    # batch_size: each attempt costs ~10 min anyway (see the
+                    # rate-limit comment at the top of cmd_create), so shrinking
+                    # the batch would only reduce the number of dice rolls per
+                    # unit time.
             matching_items = [
                 item
                 for item in created_items
@@ -484,10 +499,7 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                 time.sleep(next_sleep)
         except ApiError as error:
             if is_rate_limit_error(error):
-                backoff_sec = random.uniform(
-                    env_float("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", 300.0),
-                    env_float("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", 600.0),
-                )
+                backoff_sec = _rate_limit_backoff(error)
                 emit(
                     args,
                     {
@@ -495,6 +507,7 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                         "status_code": error.status_code,
                         "attempt": attempt,
                         "sleep_seconds": round(backoff_sec, 1),
+                        "retry_after": error.retry_after,
                         "details": error.details.strip() or "<empty>",
                     },
                     compact_line=(

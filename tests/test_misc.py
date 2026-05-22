@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from selectel_floating_ip import (
+    ApiError,
     attempts_label,
-    batch_size_backoff,
     filter_ips,
     project_floating_ips,
 )
+from sfip.cli import _format_duration, _rate_limit_backoff
 
 
 def test_attempts_label_unlimited():
@@ -21,14 +20,38 @@ def test_attempts_label_finite():
     assert attempts_label(5) == "5"
 
 
-@pytest.mark.parametrize("size,expected", [(1, 1), (2, 1), (3, 1), (4, 2), (10, 5), (12, 6)])
-def test_batch_size_backoff_halves(size, expected):
-    assert batch_size_backoff(size) == expected
+def test_format_duration_seconds():
+    assert _format_duration(0) == "0s"
+    assert _format_duration(45) == "45s"
 
 
-def test_batch_size_backoff_floor_is_one():
-    assert batch_size_backoff(0) == 1
-    assert batch_size_backoff(-5) == 1
+def test_format_duration_minutes():
+    assert _format_duration(60) == "1m00s"
+    assert _format_duration(125) == "2m05s"
+
+
+def test_format_duration_hours():
+    assert _format_duration(3600) == "1h00m"
+    assert _format_duration(60000) == "16h40m"
+
+
+def test_rate_limit_backoff_uses_retry_after_as_lower_bound(monkeypatch):
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", "100")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", "200")
+    # Retry-After bigger than the env floor — the floor must lift to it
+    error = ApiError("x", status_code=429, retry_after=500.0)
+    for _ in range(20):
+        backoff = _rate_limit_backoff(error)
+        assert backoff >= 500.0
+
+
+def test_rate_limit_backoff_falls_within_env_window(monkeypatch):
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", "540")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", "720")
+    error = ApiError("x", status_code=429)  # no Retry-After
+    for _ in range(20):
+        backoff = _rate_limit_backoff(error)
+        assert 540.0 <= backoff <= 720.0
 
 
 def make_ip(**fields):

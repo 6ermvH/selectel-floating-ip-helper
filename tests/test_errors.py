@@ -67,3 +67,13 @@ def test_resource_not_found():
     assert is_resource_not_found_error(err(404, "resource_not_found here"))
     assert not is_resource_not_found_error(err(404, {"error": "something_else"}))
     assert not is_resource_not_found_error(err(500))
+
+
+def test_api_error_retry_after_defaults_to_none():
+    error = ApiError("x", status_code=429, details="rate")
+    assert error.retry_after is None
+
+
+def test_api_error_carries_retry_after():
+    error = ApiError("x", status_code=429, details="rate", retry_after=420.0)
+    assert error.retry_after == 420.0

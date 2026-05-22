@@ -8,7 +8,6 @@ import sys
 import sfip.config as _config
 from sfip.api import (
     ApiError,
-    batch_size_backoff,
     is_empty_request_error,
     is_project_locked_error,
     is_quota_exceeded_error,
@@ -28,7 +27,6 @@ __all__ = [
     "ENV_PATH",
     "address_matches_local_lists",
     "attempts_label",
-    "batch_size_backoff",
     "env_flag",
     "env_float",
     "env_int",

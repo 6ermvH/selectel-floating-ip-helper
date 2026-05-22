@@ -19,9 +19,20 @@ TRANSIENT_HTTP_STATUS_CODES = {408, 500, 502, 503, 504}
 
 
 class ApiError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None, details: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        details: str = "",
+        retry_after: float | None = None,
+    ) -> None:
         self.status_code = status_code
         self.details = details
+        # Most recent Retry-After value observed for this request, in seconds.
+        # Set when the API returns 429 (rate limit) so callers can align their
+        # top-level backoff with what Selectel asked for.
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -50,6 +61,7 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
     backoff_cap = env_float("SELECTEL_BACKOFF_CAP_SECONDS", 90.0)
     request_timeout = env_float("SELECTEL_HTTP_TIMEOUT_SECONDS", 30.0)
 
+    last_retry_after: float | None = None
     for attempt in range(1, max_retries + 1):
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
@@ -60,17 +72,36 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
                 return json.loads(body)
         except urllib.error.HTTPError as error:
             details = error.read().decode("utf-8", errors="replace")
-            if error.code == 429 and attempt < max_retries:
-                retry_after = error.headers.get("Retry-After")
-                if retry_after:
+            if error.code == 429:
+                raw_retry_after = error.headers.get("Retry-After")
+                parsed_retry_after: float | None = None
+                if raw_retry_after:
                     try:
-                        wait_seconds = float(retry_after)
+                        parsed_retry_after = float(raw_retry_after)
                     except ValueError:
-                        wait_seconds = min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
-                else:
-                    wait_seconds = min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
-                sleep_with_jitter(wait_seconds, wait_seconds + 3.0)
-                continue
+                        parsed_retry_after = None
+                logger.warning(
+                    "rate-limited (429) on %s %s; Retry-After=%s",
+                    method,
+                    url,
+                    raw_retry_after if raw_retry_after else "<absent>",
+                )
+                if parsed_retry_after is not None:
+                    last_retry_after = parsed_retry_after
+                if attempt < max_retries:
+                    wait_seconds = (
+                        parsed_retry_after
+                        if parsed_retry_after is not None
+                        else min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
+                    )
+                    sleep_with_jitter(wait_seconds, wait_seconds + 3.0)
+                    continue
+                raise ApiError(
+                    f"{method} {url} failed",
+                    status_code=error.code,
+                    details=details,
+                    retry_after=last_retry_after,
+                ) from error
             if error.code in TRANSIENT_HTTP_STATUS_CODES and attempt < max_retries:
                 wait_seconds = min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
                 sleep_with_jitter(wait_seconds, wait_seconds + 3.0)
@@ -213,12 +244,6 @@ def planned_batch_size(token: str, project_id: str) -> tuple[int, list[dict]]:
     available = max(0, quota_limit - current_used)
     size = max(1, min(batch_limit, available if available > 0 else batch_limit))
     return size, cached_ips
-
-
-def batch_size_backoff(batch_size: int) -> int:
-    if batch_size <= 1:
-        return 1
-    return max(1, batch_size // 2)
 
 
 def cleanup_created_ip(token: str, floatingip_id: str | None, address: str | None = None) -> None:

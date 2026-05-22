@@ -64,21 +64,30 @@ def _format_duration(seconds: int) -> str:
     return f"{hours}h{mins:02d}m"
 
 
-def _rate_limit_backoff(error: ApiError) -> float:
+def _rate_limit_backoff(error: ApiError, streak: int = 1) -> float:
     """Pick a top-level sleep duration after a 429.
 
-    If Selectel returned a Retry-After (captured on ApiError), use it as the
-    lower bound — undercutting it just buys another 429. Otherwise fall back
-    to a uniform draw inside [MIN, MAX]; the defaults (540, 720) sit around
-    the empirically observed ~10 min limit.
+    The base window [MIN, MAX] (defaults 540-720s) sits around the
+    empirically observed ~10 min limit for one isolated 429. If we keep
+    getting 429 on consecutive attempts, the actual window is longer or the
+    limiter is being extended on each rejection — so we double the window on
+    each subsequent rate-limit in the same streak, capped by
+    SELECTEL_RATE_LIMIT_BACKOFF_CAP_SECONDS (default 1h). A Retry-After
+    from Selectel (when present) lifts the floor of the resulting range.
     """
     floor = env_float("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", 540.0)
     ceiling = env_float("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", 720.0)
+    cap = env_float("SELECTEL_RATE_LIMIT_BACKOFF_CAP_SECONDS", 3600.0)
     if ceiling < floor:
         ceiling = floor
+    multiplier = 2 ** max(0, streak - 1)
+    lower = min(cap, floor * multiplier)
+    upper = min(cap, ceiling * multiplier)
+    if upper < lower:
+        upper = lower
     observed = error.retry_after if error.retry_after is not None else 0.0
-    lower = max(floor, observed)
-    upper = max(ceiling, lower)
+    lower = max(lower, observed)
+    upper = max(upper, lower)
     return random.uniform(lower, upper)
 
 
@@ -242,6 +251,10 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
     cached_ips: list[dict] = []
     while args.max_attempts <= 0 or attempt < args.max_attempts:
         attempt += 1
+        # Streak of consecutive 429s in this outer iteration. Drives the
+        # exponential growth in _rate_limit_backoff so we stop hammering a
+        # window that the previous wait failed to clear.
+        rate_limit_streak = 0
         created_items: list[dict] = []
         match_kept = False
         try:
@@ -252,20 +265,24 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                     break
                 except ApiError as error:
                     if is_rate_limit_error(error):
-                        backoff_sec = _rate_limit_backoff(error)
+                        rate_limit_streak += 1
+                        backoff_sec = _rate_limit_backoff(error, streak=rate_limit_streak)
                         emit(
                             args,
                             {
                                 "rate_limited": True,
                                 "status_code": error.status_code,
                                 "attempt": attempt,
+                                "rate_limit_streak": rate_limit_streak,
                                 "sleep_seconds": round(backoff_sec, 1),
                                 "retry_after": error.retry_after,
                                 "details": error.details.strip() or "<empty>",
                             },
                             compact_line=(
                                 f"attempt {attempt} -> rate limited "
-                                f"({error.details.strip() or '<empty>'}), retry after {backoff_sec:.0f}s"
+                                f"(streak={rate_limit_streak}, "
+                                f"{error.details.strip() or '<empty>'}), "
+                                f"retry after {backoff_sec:.0f}s"
                             ),
                         )
                         time.sleep(backoff_sec)
@@ -499,20 +516,24 @@ def cmd_create(token: str, args: argparse.Namespace) -> int:
                 time.sleep(next_sleep)
         except ApiError as error:
             if is_rate_limit_error(error):
-                backoff_sec = _rate_limit_backoff(error)
+                rate_limit_streak += 1
+                backoff_sec = _rate_limit_backoff(error, streak=rate_limit_streak)
                 emit(
                     args,
                     {
                         "rate_limited": True,
                         "status_code": error.status_code,
                         "attempt": attempt,
+                        "rate_limit_streak": rate_limit_streak,
                         "sleep_seconds": round(backoff_sec, 1),
                         "retry_after": error.retry_after,
                         "details": error.details.strip() or "<empty>",
                     },
                     compact_line=(
                         f"attempt {attempt} -> rate limited "
-                        f"({error.details.strip() or '<empty>'}), retry after {backoff_sec:.0f}s"
+                        f"(streak={rate_limit_streak}, "
+                        f"{error.details.strip() or '<empty>'}), "
+                        f"retry after {backoff_sec:.0f}s"
                     ),
                 )
                 time.sleep(backoff_sec)

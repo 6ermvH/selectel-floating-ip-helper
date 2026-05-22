@@ -38,20 +38,42 @@ def test_format_duration_hours():
 def test_rate_limit_backoff_uses_retry_after_as_lower_bound(monkeypatch):
     monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", "100")
     monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", "200")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_CAP_SECONDS", "10000")
     # Retry-After bigger than the env floor — the floor must lift to it
     error = ApiError("x", status_code=429, retry_after=500.0)
     for _ in range(20):
-        backoff = _rate_limit_backoff(error)
+        backoff = _rate_limit_backoff(error, streak=1)
         assert backoff >= 500.0
 
 
 def test_rate_limit_backoff_falls_within_env_window(monkeypatch):
     monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", "540")
     monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", "720")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_CAP_SECONDS", "3600")
     error = ApiError("x", status_code=429)  # no Retry-After
     for _ in range(20):
-        backoff = _rate_limit_backoff(error)
+        backoff = _rate_limit_backoff(error, streak=1)
         assert 540.0 <= backoff <= 720.0
+
+
+def test_rate_limit_backoff_doubles_on_each_streak(monkeypatch):
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", "540")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", "720")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_CAP_SECONDS", "10000")
+    error = ApiError("x", status_code=429)
+    for _ in range(20):
+        assert 1080.0 <= _rate_limit_backoff(error, streak=2) <= 1440.0
+        assert 2160.0 <= _rate_limit_backoff(error, streak=3) <= 2880.0
+
+
+def test_rate_limit_backoff_caps_at_env_cap(monkeypatch):
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MIN_SECONDS", "540")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_MAX_SECONDS", "720")
+    monkeypatch.setenv("SELECTEL_RATE_LIMIT_BACKOFF_CAP_SECONDS", "1000")
+    error = ApiError("x", status_code=429)
+    # streak=5 would naturally be 540*16=8640 .. 720*16=11520 — clamped to 1000.
+    for _ in range(20):
+        assert _rate_limit_backoff(error, streak=5) == 1000.0
 
 
 def make_ip(**fields):

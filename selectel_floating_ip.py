@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 
+import sfip.config as _config
 from sfip.api import (
     ApiError,
     batch_size_backoff,
@@ -17,7 +18,6 @@ from sfip.api import (
     project_floating_ips,
 )
 from sfip.cli import attempts_label, main
-import sfip.config as _config
 from sfip.config import env_flag, env_float, env_int, normalize_chat_id
 from sfip.matchers import address_matches_local_lists, filter_ips, load_local_matchers
 

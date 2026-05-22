@@ -29,7 +29,7 @@ from .api import (
     sleep_with_jitter,
 )
 from .config import SCRIPT_DIR, env, env_float, env_int, load_env_file
-from .log import append_log_line, init_log_path, utc_now
+from .log import logger, setup_logging, utc_now
 from .matchers import (
     address_matches_local_lists,
     default_ip_list_dir,
@@ -68,11 +68,10 @@ def output_mode(args: argparse.Namespace) -> str:
 def emit(args: argparse.Namespace, payload: dict, compact_line: str | None = None) -> None:
     if output_mode(args) == "json" or not compact_line:
         print_json(payload)
-        log_path = getattr(args, "log_path", None)
-        append_log_line(log_path, json.dumps(payload, ensure_ascii=False))
+        logger.info(json.dumps(payload, ensure_ascii=False))
         return
     print(compact_line)
-    append_log_line(getattr(args, "log_path", None), compact_line)
+    logger.info(compact_line)
 
 
 def write_pending_match(args: argparse.Namespace, payload: dict) -> None:
@@ -104,16 +103,25 @@ def cmd_list(token: str, args: argparse.Namespace) -> int:
 def cmd_find(token: str, args: argparse.Namespace) -> int:
     items = list_floating_ips(token)
     items = filter_ips(items, args)
+    compact_line = (
+        f"matches={len(items)} ip_list_dir={args.ip_list_dir}"
+        if args.local_list
+        else f"matches={len(items)}"
+    )
     emit(
         args,
-        {"matches": items, "count": len(items), "ip_list_dir": args.ip_list_dir if args.local_list else None},
-        compact_line=f"matches={len(items)} ip_list_dir={args.ip_list_dir}" if args.local_list else f"matches={len(items)}",
+        {
+            "matches": items,
+            "count": len(items),
+            "ip_list_dir": args.ip_list_dir if args.local_list else None,
+        },
+        compact_line=compact_line,
     )
     return 0 if items else 1
 
 
 def cmd_create(token: str, args: argparse.Namespace) -> int:
-    args.log_path = init_log_path()
+    setup_logging(log_to_file=True)
     project_id = args.project_id or str(env("SELECTEL_PROJECT_ID"))
     region = args.region or str(env("SELECTEL_REGION"))
     list_dir = Path(args.ip_list_dir)
@@ -691,9 +699,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     configure_stdio()
     load_env_file()
+    setup_logging()
     token = str(env("SELECTEL_X_TOKEN"))
     args = build_parser().parse_args()
-    args.log_path = None
     command_map = {
         "auth-check": cmd_auth_check,
         "list": cmd_list,

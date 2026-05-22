@@ -6,13 +6,12 @@ import http.client
 import ipaddress
 import json
 import random
-import socket
-import sys
 import time
 import urllib.error
 import urllib.request
 
 from .config import env_float, env_int
+from .log import logger
 from .matchers import address_matches_local_lists
 
 API_BASE = "https://api.selectel.ru/vpc/resell/v2"
@@ -83,7 +82,7 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
                 sleep_with_jitter(wait_seconds, wait_seconds + 2.0)
                 continue
             raise ApiError(f"network error: {error}") from error
-        except (TimeoutError, socket.timeout) as error:
+        except TimeoutError as error:
             if attempt < max_retries:
                 wait_seconds = min(backoff_cap, backoff_base * max(1, attempt))
                 sleep_with_jitter(wait_seconds, wait_seconds + 2.0)
@@ -201,7 +200,12 @@ def planned_batch_size(token: str, project_id: str) -> tuple[int, list[dict]]:
         except ApiError as error:
             if error.status_code in {500, 502, 503, 504} and attempt < 3:
                 wait = min(30.0, 2.0 * (2 ** (attempt - 1)))
-                print(f"planned_batch_size: HTTP {error.status_code}, retry {attempt}/3 in {wait:.1f}s", file=sys.stderr)
+                logger.warning(
+                    "planned_batch_size: HTTP %s, retry %d/3 in %.1fs",
+                    error.status_code,
+                    attempt,
+                    wait,
+                )
                 time.sleep(wait)
             else:
                 raise
@@ -226,10 +230,15 @@ def cleanup_created_ip(token: str, floatingip_id: str | None, address: str | Non
         if error.status_code == 404:
             return
         target = f"{address} " if address else ""
-        print(f"WARN: cleanup delete failed for {target}id={floatingip_id}: HTTP {error.status_code}", file=sys.stderr)
+        logger.warning(
+            "cleanup delete failed for %sid=%s: HTTP %s",
+            target,
+            floatingip_id,
+            error.status_code,
+        )
     except Exception as error:
         target = f"{address} " if address else ""
-        print(f"WARN: cleanup delete failed for {target}id={floatingip_id}: {error}", file=sys.stderr)
+        logger.warning("cleanup delete failed for %sid=%s: %s", target, floatingip_id, error)
 
 
 def cleanup_nonmatching_project_ips(

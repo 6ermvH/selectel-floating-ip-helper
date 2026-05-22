@@ -9,6 +9,7 @@ import time
 import urllib.request
 
 from .config import env, env_flag, env_float, env_int, normalize_chat_id
+from .log import logger
 
 
 def telegram_enabled() -> bool:
@@ -56,7 +57,7 @@ def send_telegram_message(message: str, *, reply_markup: dict | None = None) -> 
     try:
         return telegram_api_request("sendMessage", payload)
     except Exception as error:
-        print(f"Telegram notify failed: {error}", file=sys.stderr)
+        logger.warning("Telegram notify failed: %s", error)
         return None
 
 
@@ -69,7 +70,7 @@ def safe_telegram_call(method: str, payload: dict | None = None) -> dict | None:
     try:
         return telegram_api_request(method, payload)
     except Exception as error:
-        print(f"Telegram {method} failed: {error}", file=sys.stderr)
+        logger.warning("Telegram %s failed: %s", method, error)
         return None
 
 
@@ -86,7 +87,7 @@ def next_telegram_update_offset() -> int | None:
     try:
         updates = get_telegram_updates(timeout=0)
     except Exception as error:
-        print(f"Telegram update probe failed: {error}", file=sys.stderr)
+        logger.warning("Telegram update probe failed: %s", error)
         return None
     if not updates:
         return None
@@ -158,7 +159,7 @@ def wait_for_telegram_match_confirmation(message: str) -> str | None:
         try:
             updates = get_telegram_updates(offset=offset, timeout=poll_timeout)
         except Exception as error:
-            print(f"Telegram confirmation polling failed: {error}", file=sys.stderr)
+            logger.warning("Telegram confirmation polling failed: %s", error)
             time.sleep(3)
             continue
 
@@ -223,15 +224,15 @@ def resolve_match_action(message: str) -> str:
 
 def confirm_continue_on_existing_match(address: str, floatingip_id: str) -> bool:
     if not sys.stdin.isatty():
-        print(
-            f"Найден подходящий "
-            f"существующий IP {address} "
-            f"(id={floatingip_id}). "
+        logger.warning(
+            "Найден подходящий "
+            "существующий IP %s (id=%s). "
             "Обнаружен "
             "неинтерактивный "
             "режим, остановка "
             "без изменений.",
-            file=sys.stderr,
+            address,
+            floatingip_id,
         )
         return False
 

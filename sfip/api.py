@@ -61,7 +61,6 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
     backoff_cap = env_float("SELECTEL_BACKOFF_CAP_SECONDS", 90.0)
     request_timeout = env_float("SELECTEL_HTTP_TIMEOUT_SECONDS", 30.0)
 
-    last_retry_after: float | None = None
     for attempt in range(1, max_retries + 1):
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
@@ -73,6 +72,11 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
         except urllib.error.HTTPError as error:
             details = error.read().decode("utf-8", errors="replace")
             if error.code == 429:
+                # Selectel's VPC Resell API does not include Retry-After
+                # (observed 2026-05); even when it does, the window is on
+                # the order of 10 min, far longer than this loop's
+                # backoff_cap. Don't retry here — raise with the parsed
+                # Retry-After (if any) so the caller can wait properly.
                 raw_retry_after = error.headers.get("Retry-After")
                 parsed_retry_after: float | None = None
                 if raw_retry_after:
@@ -86,21 +90,11 @@ def api_request(method: str, path: str, token: str, payload: dict | None = None)
                     url,
                     raw_retry_after if raw_retry_after else "<absent>",
                 )
-                if parsed_retry_after is not None:
-                    last_retry_after = parsed_retry_after
-                if attempt < max_retries:
-                    wait_seconds = (
-                        parsed_retry_after
-                        if parsed_retry_after is not None
-                        else min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
-                    )
-                    sleep_with_jitter(wait_seconds, wait_seconds + 3.0)
-                    continue
                 raise ApiError(
                     f"{method} {url} failed",
                     status_code=error.code,
                     details=details,
-                    retry_after=last_retry_after,
+                    retry_after=parsed_retry_after,
                 ) from error
             if error.code in TRANSIENT_HTTP_STATUS_CODES and attempt < max_retries:
                 wait_seconds = min(backoff_cap, backoff_base * (2 ** (attempt - 1)))
